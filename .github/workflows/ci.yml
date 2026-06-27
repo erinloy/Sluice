@@ -42,7 +42,7 @@ jobs:
       - name: Install Coyote CLI
         run: dotnet tool install --global Microsoft.Coyote.CLI --version 1.7.11
       - name: Build · rewrite · systematic test
-        run: ./scripts/run-coyote.sh 500
+        run: bash scripts/run-coyote.sh 500
         shell: bash
 
   publish:
