@@ -1,0 +1,30 @@
+<Project>
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <Authors>Erin Loy</Authors>
+    <Product>Sluice</Product>
+    <Copyright>Copyright (c) 2026 Erin Loy</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/erinloy/Sluice</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/erinloy/Sluice</PackageProjectUrl>
+    <PackageTags>ipc;shared-memory;rpc;zero-copy;zero-allocation;memorypack;mmap;low-latency</PackageTags>
+    <Description>Zero-serialization, zero-copy shared-memory RPC for .NET. Messages live in a memory-mapped ring and are read in place — no decode, no allocation on the hot path.</Description>
+
+    <!-- Default version; CI overrides with -p:Version=… (prerelease on master, the tag on v* releases). -->
+    <Version Condition="'$(Version)' == ''">0.1.0</Version>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+  </PropertyGroup>
+
+  <!-- Embed the one Sluice README in every package (it lives next to this props file). -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
+
+</Project>

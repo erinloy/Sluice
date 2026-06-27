@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+    <Description>Sluice.Fusion — a Fusion-style overlay where processes attach, mirror, and cache each other's data models with lazy invalidation propagation over Sluice shared memory.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sluice\Sluice.csproj" />
+  </ItemGroup>
+
+</Project>

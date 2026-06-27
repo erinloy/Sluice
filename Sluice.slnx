@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/bench/">
+    <Project Path="bench/Sluice.Benchmarks/Sluice.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/Sluice.Demo/Sluice.Demo.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Sluice.Fusion/Sluice.Fusion.csproj" />
+    <Project Path="src/Sluice.Gossip/Sluice.Gossip.csproj" />
+    <Project Path="src/Sluice/Sluice.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Sluice.Tests/Sluice.Tests.csproj" />
+  </Folder>
+</Solution>
