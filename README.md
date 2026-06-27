@@ -338,9 +338,9 @@ history: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-## Design notes & honest limitations
+## Design notes & limitations
 
-- **Cross-platform, with one honest asymmetry: the doorbell.** Windows backs the region with a named
+- **Cross-platform, with one asymmetry: the doorbell.** Windows backs the region with a named
   (page-file) map and signals readers via a named `EventWaitHandle` (sub-µs wakeups). Linux — where named maps
   and named wait handles aren't supported in .NET — backs it with a `/dev/shm` (tmpfs) file map and has **no OS
   doorbell**, so a blocked reader polls with an escalating backoff capped at ~1 ms. Throughput and the in-place

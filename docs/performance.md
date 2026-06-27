@@ -10,7 +10,7 @@ The numbers, how they were measured, and the knobs that move them. Everything he
 BenchmarkDotNet v0.14.0, Windows 11, .NET 10.0.9 (X64 RyuJIT AVX-512), Concurrent Server GC
 ```
 
-Two honesty notes up front, because they decide which numbers you can trust:
+Two things decide which numbers you can trust:
 
 1. **Allocations are deterministic** — they do not depend on machine load or hardware. The allocation columns
    below are exact and reproduce everywhere.
