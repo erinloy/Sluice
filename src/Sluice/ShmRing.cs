@@ -58,6 +58,7 @@ public sealed unsafe class ShmRing : IDisposable
     private readonly string? _backingFile;       // non-null on Unix; the owner unlinks it on dispose
     private readonly bool _ownsFile;
     private byte* _base;
+    private volatile bool _disposed;             // set before _base is nulled; lets a concurrent reader/writer bail cleanly
     private readonly long _capacity;
 
     // Private cursor caches — each side owns its cursor and only re-reads the other side's cursor when its
@@ -151,6 +152,7 @@ public sealed unsafe class ShmRing : IDisposable
     /// </summary>
     public bool TryWrite(ReadOnlySpan<byte> payload)
     {
+        if (_disposed) return false;   // ring torn down — drop (Write turns this into an ObjectDisposedException)
         int payloadLen = payload.Length;
         if (payloadLen > MaxPayload)
             throw new ArgumentException($"payload {payloadLen} exceeds MaxPayload {MaxPayload}", nameof(payload));
@@ -203,6 +205,7 @@ public sealed unsafe class ShmRing : IDisposable
         var spin = new SpinWait();
         while (!TryWrite(payload))
         {
+            if (_disposed) throw new ObjectDisposedException(nameof(ShmRing)); // else TryWrite=false would spin forever
             ct.ThrowIfCancellationRequested();
             spin.SpinOnce();
         }
@@ -220,6 +223,7 @@ public sealed unsafe class ShmRing : IDisposable
     /// </remarks>
     public bool TryRead(out ReadOnlySpan<byte> payload)
     {
+        if (_disposed) { payload = default; return false; }   // ring torn down (peer gone / closed) — nothing to read
         long read = _localRead;
         if (read == _cachedWrite)
         {
@@ -251,6 +255,7 @@ public sealed unsafe class ShmRing : IDisposable
     /// <summary>Commit the read that <see cref="TryRead"/> peeked, freeing the slot for the producer.</summary>
     public void AdvanceRead()
     {
+        if (_disposed) return;
         _localRead += _pendingAdvance;
         _pendingAdvance = 0;
         Volatile.Write(ref Cursor(ReadOffsetPos), _localRead);          // release: frees space for producer
@@ -264,6 +269,7 @@ public sealed unsafe class ShmRing : IDisposable
     {
         for (int i = 0; i < spinCount; i++)
         {
+            if (_disposed) return false;
             if (!IsEmpty) return true;
             if (ct.IsCancellationRequested) return false;
             Thread.SpinWait(1 << Math.Min(i, 8));
@@ -273,6 +279,7 @@ public sealed unsafe class ShmRing : IDisposable
         int idle = 0;
         while (IsEmpty)
         {
+            if (_disposed) return false;
             if (ct.IsCancellationRequested) return false;
             if (_doorbell is not null)
             {
@@ -292,6 +299,7 @@ public sealed unsafe class ShmRing : IDisposable
     {
         get
         {
+            if (_disposed) return true;   // a torn-down ring reads as empty so WaitToRead/TryRead unwind cleanly
             if (_localRead != _cachedWrite) return false;
             _cachedWrite = Volatile.Read(ref Cursor(WriteOffsetPos));
             return _localRead == _cachedWrite;
@@ -306,6 +314,7 @@ public sealed unsafe class ShmRing : IDisposable
 
     public void Dispose()
     {
+        _disposed = true;   // publish BEFORE nulling _base so a concurrent TryRead/TryWrite sees it and bails (no NRE)
         if (_base != null)
         {
             _view.SafeMemoryMappedViewHandle.ReleasePointer();
