@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CA1416</NoWarn>
+    <Description>Sluice.Supergraph — a federated reactive graph. Vertices are owned by participants spread across shared memory and the network; reads of a local vertex are zero round-trip while remote vertices route a fetch over Sluice.Fabric, and a change anywhere propagates as a tiny invalidation across the whole federation, so many processes form one logical reactive graph.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Sluice\Sluice.csproj" />
+    <ProjectReference Include="..\Sluice.Fusion\Sluice.Fusion.csproj" />
+  </ItemGroup>
+
+</Project>

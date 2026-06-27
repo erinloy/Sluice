@@ -64,6 +64,10 @@ public sealed class FederatedTransport : ITransport
 
         public string Name { get; }
 
+        /// <summary>The local (same-host) facing identity — member 0 is the local channel. Remote peers address
+        /// this node by the id its network transport announced; a co-located peer addresses it by this.</summary>
+        public ParticipantId Self => _members[0].Self;
+
         public FederatedChannel(string name, FederatedTransport owner, IReadOnlyList<IChannel> members,
             ParticipantId self)
         {

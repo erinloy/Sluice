@@ -4,6 +4,30 @@ All notable changes to Sluice are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`Sluice.Supergraph`** — a **federated reactive graph**: `Sluice.Fusion`'s invalidate→refetch model generalized
+  over the fabric so it spans hosts. A `GraphPeer` owns `SourceVertex`/`ComputedVertex` vertices and `Observe`s
+  others by `VertexId` (`owner participant + key`). A read of a vertex you own is a direct local read; a remote one
+  routes a correlated fetch over the fabric (shared-memory or network); a change broadcasts a tiny invalidation
+  across the whole federation. A `ComputedVertex` whose dependencies live on other participants recomputes and
+  re-publishes when they change, so change propagates transitively — many processes form one logical reactive
+  graph. Self-healing under message loss: lost fetches retry, and an invalidation high-water mark prevents a
+  fetch from caching a value older than an invalidation that raced ahead of it. (`samples/Sluice.SupergraphDemo`,
+  [docs](docs/supergraph.md).)
+- **`IChannel.Self`** — a channel now exposes the `ParticipantId` it publishes as (the address peers reply to). The
+  primitive a reply-routing layer (RPC, the supergraph's fetch) needs to address messages back to itself.
+
+### Fixed
+
+- **`ShmPeer.Send` is now thread-safe.** The outbox cache was a plain `Dictionary` mutated without
+  synchronization; concurrent sends from multiple threads (e.g. a fabric pump replying while a worker thread sends
+  a request) could corrupt it. Guarded by a lock around the cache lookup (the ring's own publish stays lock-free).
+- **A throwing `ChannelHandler` no longer deafens a channel.** The shared-memory and TCP transport pumps now
+  isolate each delivery, so one bad handler call drops only its own message instead of killing the pump thread.
+
 ## [0.1.0] - 2026-06-26
 
 Initial public release. Sluice is a zero-serialization, zero-copy, read-in-place shared-memory transport for

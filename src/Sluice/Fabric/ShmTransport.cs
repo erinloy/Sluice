@@ -173,7 +173,7 @@ public sealed class ShmTransport : ITransport
                     if (TryDecode(span, out var from, out var kind, out var payload) && from != _ch._self)
                     {
                         _ch.Note(from);
-                        _handler(new Inbound { From = from, Kind = kind, Payload = payload });
+                        Dispatch(from, kind, payload);
                     }
                     _ch._broadcastSub.Advance();
                     any = true;
@@ -189,11 +189,19 @@ public sealed class ShmTransport : ITransport
                     if (TryDecode(msg, out var from, out var kind, out var payload))
                     {
                         _ch.Note(from);
-                        _handler(new Inbound { From = from, Kind = kind, Payload = payload });
+                        Dispatch(from, kind, payload);
                     }
                     any = true;
                 }
                 return any;
+            }
+
+            // A throwing handler must never kill the pump — that would silently make the channel deaf to every
+            // future message. Isolate each delivery; a bad handler call drops only its own message.
+            private void Dispatch(ParticipantId from, int kind, ReadOnlySpan<byte> payload)
+            {
+                try { _handler(new Inbound { From = from, Kind = kind, Payload = payload }); }
+                catch { /* one handler call failed; keep pumping */ }
             }
 
             private bool _disposed;

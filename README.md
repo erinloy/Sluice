@@ -31,7 +31,7 @@ It does two things:
 
 ## Install
 
-Sluice publishes to **GitHub Packages** (`Sluice`, `Sluice.Gossip`, `Sluice.Fusion`). Each push to `master`
+Sluice publishes to **GitHub Packages** (`Sluice`, `Sluice.Gossip`, `Sluice.Fusion`, `Sluice.Supergraph`). Each push to `master`
 ships a CI prerelease (`0.1.0-ci.<n>`); tagging `vX.Y.Z` ships the stable `X.Y.Z`. Both target **net8.0** and
 **net10.0**.
 
@@ -49,9 +49,10 @@ dotnet nuget add source "https://nuget.pkg.github.com/erinloy/index.json" \
 Then reference it from any project:
 
 ```bash
-dotnet add package Sluice          # core RPC + multi-way fabric
-dotnet add package Sluice.Gossip   # epidemic dissemination (optional)
-dotnet add package Sluice.Fusion   # attach/mirror/cache overlay (optional)
+dotnet add package Sluice            # core RPC + multi-way fabric
+dotnet add package Sluice.Gossip     # epidemic dissemination (optional)
+dotnet add package Sluice.Fusion     # attach/mirror/cache overlay (optional)
+dotnet add package Sluice.Supergraph # federated reactive graph (optional)
 ```
 
 To pin the latest CI prerelease, add `--prerelease`. Or declare the source in a repo-local `nuget.config`
@@ -175,6 +176,30 @@ using var state = new MirroredState(mirror, "AAPL");
 state.Updated += v => Render(v);            // push feed, like Fusion's ComputedState<T>
 ```
 
+**`Sluice.Supergraph`** — a **federated reactive graph**: `Sluice.Fusion`'s invalidate→refetch model generalized
+over [the fabric](docs/federation.md) so it spans hosts. Vertices are owned by participants across shared memory
+*and* the network; a read of a vertex you own is a direct local read, a remote one routes a fetch over the fabric,
+and a change broadcasts a tiny invalidation across the whole federation. A `ComputedVertex` whose dependencies live
+on other participants recomputes and re-publishes when they change — so a change propagates transitively and many
+processes behave as one logical reactive graph.
+
+```csharp
+using var prices = new GraphPeer(new ShmTransport("prices"), "book");
+using var risk   = new GraphPeer(new ShmTransport("risk"),   "book");
+using var desk   = new GraphPeer(new ShmTransport("desk"),   "book");
+
+var spot = prices.Define("spot", codec);
+using var exposure = risk.Computed("exposure", codec,            // depends on a vertex owned elsewhere
+    () => risk.Get(spot.Id, codec).Value * 100.0, spot.Id);
+using var view = desk.Observe(exposure.Id, codec);              // reactive view of a third participant's vertex
+view.Updated += v => Render(v);
+
+spot.Set(43.25);   // ripples prices → risk → desk across two participant boundaries
+```
+
+Give a `GraphPeer` a `FederatedTransport` instead of a bare `ShmTransport` and the same graph spans hosts. See
+**[the supergraph guide](docs/supergraph.md)**.
+
 ---
 
 ## Try the demo
@@ -234,6 +259,9 @@ Deeper guides live in [`docs/`](docs/):
   channels, topics, peers, gossip, and Fusion.
 - **[The fabric](docs/federation.md)** — the transport-agnostic seam: one channel spanning local shared-memory
   participants (zero-copy) and remote participants over TCP, indistinguishably.
+- **[The supergraph](docs/supergraph.md)** — a federated reactive graph over the fabric: Fusion's
+  invalidate→refetch, generalized so many processes form one logical reactive graph across shared memory and the
+  network.
 - **[Delivery & safety](docs/delivery-and-safety.md)** — reliable vs lossy, torn-read handling, the memory
   model, crash robustness, and the systematic concurrency proof, failure mode by failure mode.
 - **[Deployment & cross-platform](docs/deployment.md)** — Windows vs Linux internals, container `/dev/shm`
@@ -293,12 +321,14 @@ src/Sluice                 the library
   ShmFrameListener.cs      Accept() — multiplex many client connections onto one daemon
 src/Sluice.Gossip          epidemic dissemination (GossipNode: LWW store, rumor + anti-entropy)
 src/Sluice.Fusion          Fusion-style overlay (ModelHost/ModelMirror/MirroredState, lazy invalidation)
+src/Sluice.Supergraph      federated reactive graph (GraphPeer: source/observed/computed vertices over the fabric)
 tests/Sluice.Tests         xUnit suite (ring, RPC unary/stream/MPSC, multicast MP-claim/lossy/reliable,
-                           lease eviction, broadcast/bus/mesh/duplex, fabric, discovery)
+                           lease eviction, broadcast/bus/mesh/duplex, fabric, supergraph, discovery)
 tests/Sluice.Concurrency   Microsoft Coyote systematic-concurrency tests for the ring protocol
 bench/Sluice.Benchmarks    BenchmarkDotNet vs Cloudtoid + named pipes, serialization microbench, multicast
                            per-op, and the `throughput` aggregate harness
-samples/Sluice.Demo        the `kvd` daemon + thin-CLI demo
+samples/Sluice.Demo            the `kvd` daemon + thin-CLI demo
+samples/Sluice.SupergraphDemo  the federated reactive graph demo (prices → risk → desk)
 ```
 
 ---

@@ -249,10 +249,14 @@ public sealed class TcpTransport : ITransport
 
         public void Invoke(in Inbound msg)
         {
-            // Snapshot under lock, invoke outside it (handlers may run arbitrary user code).
+            // Snapshot under lock, invoke outside it (handlers may run arbitrary user code). A throwing handler
+            // must not tear down the read pump / connection, so isolate each call.
             ChannelHandler[] snapshot;
             lock (_gate) snapshot = _list.ToArray();
-            foreach (var h in snapshot) h(msg);
+            foreach (var h in snapshot)
+            {
+                try { h(msg); } catch { /* one handler failed; keep delivering */ }
+            }
         }
 
         private sealed class Remove(Handlers owner, ChannelHandler h) : IDisposable
@@ -264,6 +268,10 @@ public sealed class TcpTransport : ITransport
     private sealed class TcpChannel(TcpTransport t, string name) : IChannel
     {
         public string Name => name;
+
+        /// <summary>The node id this transport announced — what remote peers see as <see cref="Inbound.From"/>
+        /// and address their replies to.</summary>
+        public ParticipantId Self => t.Self;
 
         public void Broadcast(int kind, ReadOnlySpan<byte> payload, CancellationToken ct = default)
             => t.Broadcast(name, kind, payload);

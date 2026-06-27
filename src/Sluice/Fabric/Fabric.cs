@@ -64,6 +64,16 @@ public interface IChannel : IDisposable
 {
     string Name { get; }
 
+    /// <summary>
+    /// The address this channel publishes as — the <see cref="ParticipantId"/> that lands in
+    /// <see cref="Inbound.From"/> on messages this channel sends, and the address a peer uses to
+    /// <see cref="Send"/> back to it. A layer that needs to route a reply (a fetch, an RPC response, a federated
+    /// graph's invalidation→refetch) reads this to know its own reply address. Under a
+    /// <see cref="FederatedTransport"/> this is the local (same-host) facing identity; a remote peer addresses
+    /// the node by the id it announced on the network reach.
+    /// </summary>
+    ParticipantId Self { get; }
+
     /// <summary>Publish to every participant on the channel.</summary>
     void Broadcast(int kind, ReadOnlySpan<byte> payload, CancellationToken ct = default);
 
