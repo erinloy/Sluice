@@ -1,0 +1,7 @@
+{
+  "AssembliesPath": "bin/Release/net8.0",
+  "Assemblies": [
+    "Sluice.Concurrency.dll",
+    "Sluice.dll"
+  ]
+}

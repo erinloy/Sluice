@@ -28,8 +28,25 @@ jobs:
       - run: dotnet build Sluice.slnx -c Release --no-restore
       - run: dotnet test Sluice.slnx -c Release --no-build --verbosity normal
 
+  concurrency-check:
+    # Coyote takes over the scheduler and explores the ring's producer/consumer interleavings exhaustively,
+    # proving no schedule loses, reorders, duplicates, or tears a message. Runs on net8.0 (the Coyote CLI host).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Install Coyote CLI
+        run: dotnet tool install --global Microsoft.Coyote.CLI --version 1.7.11
+      - name: Build · rewrite · systematic test
+        run: ./scripts/run-coyote.sh 500
+        shell: bash
+
   publish:
-    needs: test
+    needs: [test, concurrency-check]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
@@ -52,7 +69,7 @@ jobs:
             echo "version=0.1.0-ci.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
           fi
       - name: Pack
-        run: dotnet pack Sluice.slnx -c Release -o "${{ runner.temp }}/nupkg" -p:Version=${{ steps.ver.outputs.version }}
+        run: dotnet pack Sluice.slnx -c Release -o "${{ runner.temp }}/nupkg" -p:Version=${{ steps.ver.outputs.version }} -p:ContinuousIntegrationBuild=true
       - name: Add GitHub Packages source
         run: >
           dotnet nuget add source

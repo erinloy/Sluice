@@ -4,7 +4,7 @@ All notable changes to Sluice are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project aims to follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-06-26
 
 Initial public release. Sluice is a zero-serialization, zero-copy, read-in-place shared-memory transport for
 .NET — same-host IPC where the bytes sitting in shared memory *are* the object.
@@ -37,6 +37,18 @@ Initial public release. Sluice is a zero-serialization, zero-copy, read-in-place
 
 - **`ShmTopic`** — broadcast (1→N) and bus (N↔N) pub/sub by name.
 - **`ShmPeer`** — addressed, full-duplex peer mesh with presence discovery.
+- **Reliable-subscriber lease eviction** — each subscriber carries a heartbeat lease (`LeaseMs`, default 30 s);
+  a reliable producer reclaims a crashed subscriber's cell instead of backpressuring on it forever.
+
+### Federation fabric (`Sluice.Fabric`)
+
+- A transport-agnostic seam — `ParticipantId`, `IChannel` (broadcast + addressed send + membership), `ISignal`
+  (the doorbell generalized), `ITransport` — so one channel can hold local and remote participants alike.
+- **`ShmTransport`** — the local realization (zero-copy, over `ShmTopic` + `ShmPeer`).
+- **`TcpTransport`** — the remote realization: channels over TCP, length-prefixed frames multiplexed per
+  channel, hello-based peer identification. (No TLS / auto-reconnect yet.)
+- **`FederatedTransport`** — composes a local + remote transports into one channel, so a single `Broadcast`
+  reaches co-located shared-memory participants *and* remote participants from the same call.
 
 ### Extensions
 
@@ -51,5 +63,16 @@ Initial public release. Sluice is a zero-serialization, zero-copy, read-in-place
 - Cross-platform: verified green on Windows and in a .NET 10 Linux container; libraries multi-target
   `net8.0;net10.0` (net8 is the Azure Container Apps LTS runtime).
 - Published to GitHub Packages via CI (build + test on Windows and Linux, then pack + push on green).
+- **SourceLink + deterministic build** — the package nuspec carries the repository URL and commit; debuggers
+  step straight to source.
 
-[Unreleased]: https://github.com/erinloy/Sluice/commits/master
+### Quality & tooling
+
+- **Microsoft Coyote systematic-concurrency tests** for the ring protocol (`tests/Sluice.Concurrency`): the
+  scheduler explores the producer/consumer interleavings exhaustively and proves no schedule loses, reorders,
+  or tears a message. Verified to catch an injected race, so a green run is a real proof. Runs in CI as the
+  `concurrency-check` job.
+- BenchmarkDotNet suite vs Cloudtoid + named pipes, serialization microbench, multicast per-op, throughput and
+  lifecycle harnesses.
+
+[0.1.0]: https://github.com/erinloy/Sluice/releases/tag/v0.1.0

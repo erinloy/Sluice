@@ -38,7 +38,7 @@ public enum DeliveryMode
 /// </summary>
 public sealed unsafe class ShmMulticast : IDisposable
 {
-    private const long Magic = 0x_5300_4D00_5500_4C02; // "S M U L" + version
+    private const long Magic = 0x_5300_4D00_5500_4C03; // "S M U L" + version (v3: leased consumer cells)
     private const long FreeCell = long.MinValue;        // an unregistered subscriber slot
     private const int CursorPos = 0;                    // producer claim counter (last claimed seq)
     private const int ModePos = 64;
@@ -46,7 +46,19 @@ public sealed unsafe class ShmMulticast : IDisposable
     private const int SlotSizePos = 72;
     private const int MaxConsumersPos = 76;
     private const int MagicPos = 80;
-    private const int ConsumerCellsPos = 128;           // MaxConsumers × 8 bytes follow
+    private const int LeaseMsPos = 88;                  // reliable-mode lease (ms); 0 = eviction disabled
+    private const int ConsumerCellsPos = 128;           // MaxConsumers × ConsumerCellSize follow
+
+    // A consumer cell is { long cursor; long heartbeatTick }. The cursor (and its FreeCell sentinel) is the
+    // CAS target for register/evict; the heartbeat is a wall-clock stamp (Environment.TickCount64 — a
+    // host-wide monotonic clock, so it compares correctly across processes) that proves the subscriber is
+    // still alive. A reliable producer skips and reclaims any cell whose lease has lapsed.
+    private const int ConsumerCellSize = 16;
+    private const int HeartbeatOffset = 8;
+
+    /// <summary>Default reliable-mode subscriber lease: 30s. Generous enough that any actively-reading
+    /// subscriber refreshes well within it, short enough that a crashed reader frees producers promptly.</summary>
+    public const long DefaultLeaseMs = 30_000;
 
     private readonly MemoryMappedFile _mmf;
     private readonly MemoryMappedViewAccessor _view;
@@ -59,13 +71,19 @@ public sealed unsafe class ShmMulticast : IDisposable
     private readonly int _maxConsumers;
     private readonly long _mask;
     private readonly int _slotsBase;
+    private readonly long _leaseMs;              // 0 = eviction disabled (a stale reliable subscriber wedges)
     public DeliveryMode Mode { get; }
+
+    /// <summary>The reliable-mode subscriber lease in milliseconds (0 = eviction disabled). A reliable
+    /// subscriber must touch the ring (read, advance, wait, or <see cref="Subscriber.Heartbeat"/>) at least
+    /// this often or a producer may evict it to avoid being wedged by a crashed reader.</summary>
+    public long LeaseMs => _leaseMs;
 
     /// <summary>Largest payload a slot can carry (slot minus the 12-byte slot header).</summary>
     public int MaxPayload => _slotSize - 12;
 
     private ShmMulticast(MemoryMappedFile mmf, long mapSize, int slotCount, int slotSize, int maxConsumers,
-        DeliveryMode mode, string? backingFile = null, bool ownsFile = false)
+        DeliveryMode mode, long leaseMs, string? backingFile = null, bool ownsFile = false)
     {
         _mmf = mmf;
         _backingFile = backingFile;
@@ -75,7 +93,8 @@ public sealed unsafe class ShmMulticast : IDisposable
         _maxConsumers = maxConsumers;
         _mask = slotCount - 1;
         Mode = mode;
-        _slotsBase = Align64(ConsumerCellsPos + maxConsumers * 8);
+        _leaseMs = leaseMs;
+        _slotsBase = Align64(ConsumerCellsPos + maxConsumers * ConsumerCellSize);
         _view = mmf.CreateViewAccessor(0, mapSize, MemoryMappedFileAccess.ReadWrite);
         byte* p = null;
         _view.SafeMemoryMappedViewHandle.AcquirePointer(ref p);
@@ -85,13 +104,13 @@ public sealed unsafe class ShmMulticast : IDisposable
     /// <summary>Create (or open-and-reset) a multicast ring. <paramref name="slotCount"/> is rounded up to a
     /// power of two; <paramref name="maxPayload"/> sets the fixed slot capacity.</summary>
     public static ShmMulticast Create(string name, int maxPayload, int slotCount = 1024,
-        DeliveryMode mode = DeliveryMode.Lossy, int maxConsumers = 64)
+        DeliveryMode mode = DeliveryMode.Lossy, int maxConsumers = 64, long leaseMs = DefaultLeaseMs)
     {
         slotCount = NextPow2(slotCount);
         int slotSize = Align8(12 + maxPayload);
-        long mapSize = Align64(ConsumerCellsPos + maxConsumers * 8) + (long)slotCount * slotSize;
+        long mapSize = Align64(ConsumerCellsPos + maxConsumers * ConsumerCellSize) + (long)slotCount * slotSize;
         var mmf = ShmMap.OpenOrCreate(name, mapSize, out var backingFile);
-        var r = new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode,
+        var r = new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode, leaseMs,
             backingFile, ownsFile: backingFile is not null);
         r.Init();
         return r;
@@ -104,15 +123,15 @@ public sealed unsafe class ShmMulticast : IDisposable
     /// first without a coordinator.
     /// </summary>
     public static ShmMulticast CreateOrAttach(string name, int maxPayload, int slotCount = 1024,
-        DeliveryMode mode = DeliveryMode.Lossy, int maxConsumers = 64)
+        DeliveryMode mode = DeliveryMode.Lossy, int maxConsumers = 64, long leaseMs = DefaultLeaseMs)
     {
         slotCount = NextPow2(slotCount);
         int slotSize = Align8(12 + maxPayload);
-        long mapSize = Align64(ConsumerCellsPos + maxConsumers * 8) + (long)slotCount * slotSize;
+        long mapSize = Align64(ConsumerCellsPos + maxConsumers * ConsumerCellSize) + (long)slotCount * slotSize;
         try
         {
             var mmf = ShmMap.CreateNew(name, mapSize, out var backingFile);
-            var r = new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode,
+            var r = new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode, leaseMs,
                 backingFile, ownsFile: backingFile is not null);
             r.Init();   // we are the creator
             return r;
@@ -134,7 +153,7 @@ public sealed unsafe class ShmMulticast : IDisposable
     public static ShmMulticast Open(string name)
     {
         var mmf = ShmMap.OpenExisting(name);
-        int slotCount, slotSize, maxConsumers; DeliveryMode mode;
+        int slotCount, slotSize, maxConsumers; DeliveryMode mode; long leaseMs;
         using (var hdr = mmf.CreateViewAccessor(0, ConsumerCellsPos, MemoryMappedFileAccess.Read))
         {
             byte* p = null;
@@ -147,11 +166,12 @@ public sealed unsafe class ShmMulticast : IDisposable
                 slotCount = Unsafe.ReadUnaligned<int>(p + SlotCountPos);
                 slotSize = Unsafe.ReadUnaligned<int>(p + SlotSizePos);
                 maxConsumers = Unsafe.ReadUnaligned<int>(p + MaxConsumersPos);
+                leaseMs = Unsafe.ReadUnaligned<long>(p + LeaseMsPos);
             }
             finally { hdr.SafeMemoryMappedViewHandle.ReleasePointer(); }
         }
-        long mapSize = Align64(ConsumerCellsPos + maxConsumers * 8) + (long)slotCount * slotSize;
-        return new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode);
+        long mapSize = Align64(ConsumerCellsPos + maxConsumers * ConsumerCellSize) + (long)slotCount * slotSize;
+        return new ShmMulticast(mmf, mapSize, slotCount, slotSize, maxConsumers, mode, leaseMs);
     }
 
     private void Init()
@@ -161,8 +181,12 @@ public sealed unsafe class ShmMulticast : IDisposable
         Unsafe.WriteUnaligned(_base + SlotCountPos, _slotCount);
         Unsafe.WriteUnaligned(_base + SlotSizePos, _slotSize);
         Unsafe.WriteUnaligned(_base + MaxConsumersPos, _maxConsumers);
+        Unsafe.WriteUnaligned(_base + LeaseMsPos, _leaseMs);
         for (int i = 0; i < _maxConsumers; i++)
+        {
+            Volatile.Write(ref ConsumerTick(i), 0);
             Volatile.Write(ref ConsumerCell(i), FreeCell);
+        }
         // Slot sequence stamps init to (index - slotCount): the "round -1" value that makes the first
         // round's reuse-wait and first read both resolve correctly.
         for (int i = 0; i < _slotCount; i++)
@@ -173,7 +197,8 @@ public sealed unsafe class ShmMulticast : IDisposable
     // ---- header / slot accessors -------------------------------------------------------------------
 
     private ref T Ref<T>(int bytePos) where T : unmanaged => ref Unsafe.AsRef<T>(_base + bytePos);
-    private ref long ConsumerCell(int i) => ref Unsafe.AsRef<long>(_base + ConsumerCellsPos + i * 8);
+    private ref long ConsumerCell(int i) => ref Unsafe.AsRef<long>(_base + ConsumerCellsPos + i * ConsumerCellSize);
+    private ref long ConsumerTick(int i) => ref Unsafe.AsRef<long>(_base + ConsumerCellsPos + i * ConsumerCellSize + HeartbeatOffset);
     private byte* Slot(long seq) => _base + _slotsBase + (int)(seq & _mask) * _slotSize;
     private ref long SlotSeq(long index) => ref Unsafe.AsRef<long>(_base + _slotsBase + (int)index * _slotSize);
 
@@ -224,13 +249,32 @@ public sealed unsafe class ShmMulticast : IDisposable
     private long MinConsumerCursor()
     {
         long min = long.MaxValue;
+        long now = Environment.TickCount64;
         for (int i = 0; i < _maxConsumers; i++)
         {
             long v = Volatile.Read(ref ConsumerCell(i));
-            if (v != FreeCell && v < min) min = v;
+            if (v == FreeCell) continue;
+
+            // Lease eviction: a registered cell whose heartbeat has lapsed is a crashed/leaked subscriber. We
+            // reclaim it (CAS back to Free) so it stops gating producers forever. _leaseMs <= 0 disables this.
+            if (_leaseMs > 0)
+            {
+                long beat = Volatile.Read(ref ConsumerTick(i));
+                if (beat != 0 && now - beat > _leaseMs)
+                {
+                    if (Interlocked.CompareExchange(ref ConsumerCell(i), FreeCell, v) == v)
+                        continue;                       // evicted; don't let it hold the gate back
+                    v = Volatile.Read(ref ConsumerCell(i)); // it changed under us — re-read and use the live value
+                    if (v == FreeCell) continue;
+                }
+            }
+            if (v < min) min = v;
         }
         return min; // long.MaxValue when nobody is registered → producer never gates
     }
+
+    // A subscriber stamps its liveness here on every touch; the producer reads it to decide eviction.
+    internal void Heartbeat(int cell) => Volatile.Write(ref ConsumerTick(cell), Environment.TickCount64);
 
     // ---- subscriber --------------------------------------------------------------------------------
 
@@ -244,7 +288,10 @@ public sealed unsafe class ShmMulticast : IDisposable
         for (int i = 0; i < _maxConsumers; i++)
         {
             if (Interlocked.CompareExchange(ref ConsumerCell(i), head, FreeCell) == FreeCell)
+            {
+                Heartbeat(i);                 // stamp liveness immediately so we aren't evicted before first read
                 return new Subscriber(this, i, head + 1);
+            }
         }
         throw new InvalidOperationException($"multicast ring is full ({_maxConsumers} subscribers).");
     }
@@ -353,7 +400,13 @@ public sealed unsafe class ShmMulticast : IDisposable
         {
             _next = _pending;
             Volatile.Write(ref _ring.ConsumerCell(_cell), _next - 1); // publish progress for reliable gating
+            _ring.Heartbeat(_cell);                                   // refresh the lease: we are alive
         }
+
+        /// <summary>Refresh this subscriber's lease without reading. Call it if you may go longer than the ring's
+        /// <see cref="ShmMulticast.LeaseMs"/> between reads (e.g. a long per-message handler) so a reliable
+        /// producer does not mistake you for a crashed reader and evict you.</summary>
+        public void Heartbeat() => _ring.Heartbeat(_cell);
 
         /// <summary>Spin until a message is available (max-throughput wait), then return; false if cancelled.</summary>
         /// <remarks>
@@ -370,6 +423,8 @@ public sealed unsafe class ShmMulticast : IDisposable
                 long index = _next & _ring._mask;
                 if (Volatile.Read(ref _ring.SlotSeq(index)) >= _next) return true;
                 if (ct.IsCancellationRequested) return false;
+                _ring.Heartbeat(_cell);               // keep the lease fresh for the whole wait — a blocked-but-live
+                                                      // subscriber must never look crashed to a reliable producer
                 if (i < spinCount) spin.SpinOnce();   // self-escalating active spin (spin → yield → sleep)
                 else Thread.Sleep(1);                 // idle tail: cap at ~1 ms so a quiet subscriber doesn't peg a core
             }

@@ -14,9 +14,10 @@ Two things decide which numbers you can trust:
 
 1. **Allocations are deterministic** — they do not depend on machine load or hardware. The allocation columns
    below are exact and reproduce everywhere.
-2. **In-process CPU benchmarks are stable** (the serialization and multicast tables, run with BenchmarkDotNet's
-   full default job). **Cross-process latencies are load-sensitive** — they involve OS scheduling and syscalls,
-   so on a busy machine they inflate, and they inflate the *other* transports (named pipes, the Cloudtoid queue)
+2. **In-process CPU benchmarks are stable** (the serialization and multicast tables, run with
+   [BenchmarkDotNet](https://benchmarkdotnet.org)'s full default job). **Cross-process latencies are
+   load-sensitive** — they involve OS scheduling and syscalls, so on a busy machine they inflate, and they
+   inflate the *other* transports (named pipes, the [Cloudtoid](https://github.com/cloudtoid/interprocess) queue)
    far more than Sluice's shared-memory spin. The end-to-end latencies below were captured on a **heavily loaded
    multi-core dev box**, so treat their absolute values as a conservative snapshot and the **ratios as a floor**,
    not a ceiling.
@@ -25,16 +26,16 @@ Two things decide which numbers you can trust:
 
 ## Read in place vs. serialize — the core claim
 
-This is the heart of Sluice: reading a message is a pointer reinterpret, not a decode. Measured against the
-common .NET serializers, decoding the *same* message (full default job, stable):
+Reading a message is a pointer reinterpret, not a decode. Measured against the common .NET serializers,
+decoding the *same* message (full default job, stable):
 
 **64-byte payload**
 
 | Reading one message            | Mean       | vs JSON    | Allocated |
 |--------------------------------|-----------:|-----------:|----------:|
 | **Sluice — blittable in place**| **6.5 ns** | **~100× faster** | **0 B** |
-| MemoryPack deserialize         | 107 ns     | 6.2×       | 272 B     |
-| MessagePack deserialize        | 313 ns     | 2.1×       | 280 B     |
+| [MemoryPack](https://github.com/Cysharp/MemoryPack) deserialize | 107 ns | 6.2× | 272 B |
+| [MessagePack](https://github.com/MessagePack-CSharp/MessagePack-CSharp) deserialize | 313 ns | 2.1× | 280 B |
 | JSON deserialize               | 667 ns     | 1.0×       | 336 B     |
 
 **1024-byte payload**
@@ -70,7 +71,9 @@ O(N) point-to-point.
 
 A full request → response round trip carrying a 256-byte payload, comparing Sluice to the realistic local-IPC
 alternatives — Cloudtoid.Interprocess (a genuine shared-memory queue) and named pipes, each with MemoryPack and
-JSON. Every alternative must serialize a message to carry the payload; Sluice sends it raw.
+JSON. Every alternative must serialize a message to carry the payload; Sluice sends it raw. The run below was
+captured on a quiet box; the serializer and allocation columns reproduce anywhere, and the latency *ratios*
+hold across hardware even though absolute nanoseconds will not.
 
 **Allocation — exact and load-independent (the cleanest cross-framework comparison):**
 
@@ -78,31 +81,36 @@ JSON. Every alternative must serialize a message to carry the payload; Sluice se
 |--------------------------|----------:|----------:|
 | **Sluice (zero-alloc receive)** | **0 B** | **0×**  |
 | Sluice (convenience `Send`)     | 280 B   | 1.0×      |
-| Cloudtoid + MemoryPack          | 1475 B  | 5.3×      |
-| Cloudtoid + JSON                | 1772 B  | 6.3×      |
+| Cloudtoid + MemoryPack          | 2008 B  | 7.2×      |
+| Cloudtoid + JSON                | 2520 B  | 9.0×      |
 | Named pipe + MemoryPack         | 2072 B  | 7.4×      |
-| Named pipe + JSON               | 2588 B  | 9.2×      |
+| Named pipe + JSON               | 2586 B  | 9.2×      |
 
-**Latency — measured on a contended box; ratios are a floor:**
+**Latency — a clean run; the two transport *classes* are the story:**
 
-| Transport                | Mean (this run) | vs Sluice |
-|--------------------------|----------------:|----------:|
-| **Sluice (zero-alloc)**  | **~0.72 µs**    | **0.9×**  |
-| **Sluice (`Send`)**      | **~0.77 µs**    | **1.0×**  |
-| Cloudtoid + MemoryPack   | ~34 µs          | ~45×      |
-| Cloudtoid + JSON         | ~39 µs          | ~51×      |
-| Named pipe + MemoryPack  | ~116 µs         | ~151×     |
-| Named pipe + JSON        | ~118 µs         | ~154×     |
+| Transport                | Mean      | vs Sluice |
+|--------------------------|----------:|----------:|
+| **Sluice (zero-alloc)**  | **439 ns**| **0.93×** |
+| **Sluice (`Send`)**      | **471 ns**| **1.00×** |
+| Cloudtoid + MemoryPack   | 1065 ns   | 2.3×      |
+| Cloudtoid + JSON         | 2040 ns   | 4.3×      |
+| Named pipe + MemoryPack  | 32.0 µs   | 68×       |
+| Named pipe + JSON        | 31.9 µs   | 68×       |
 
-The absolute microsecond figures for the queue/pipe transports are inflated by machine load (they hinge on OS
-scheduling); on a quiet box they are far lower. But that asymmetry is itself the point: **Sluice's
-shared-memory path stays sub-microsecond under contention while syscall-based transports degrade**, so its
-relative advantage *grows* exactly when a machine is busy — which is when a server is doing real work. The
-robust, everywhere-true claims are: Sluice is **one to two orders of magnitude faster end-to-end**, and it
-allocates **5–9× less, or nothing at all** on the zero-alloc path.
+Two transport classes fall out cleanly. **Cloudtoid is also a shared-memory queue**, so it lands in the same
+order of magnitude — ~2.3× slower than Sluice with MemoryPack, the gap being the serialize/copy step Sluice
+skips (and its 7× allocation). **Named pipes are a syscall transport**, and the kernel round trip costs ~68×
+— tens of microseconds against Sluice's sub-microsecond. The claims that hold across hardware: against a
+serialized shared-memory queue Sluice is ~2–4× faster and 7–9× lighter; against a kernel transport it is ~70×
+faster; and the zero-alloc path allocates nothing at all.
 
-> Reproduce these yourself with the command in [Reproducing](#reproducing) — and ideally on an idle machine, for
-> tighter latency numbers than a shared CI/dev box gives.
+One asymmetry matters in production: under machine load the syscall transports degrade more than Sluice's
+shared-memory spin (OS scheduling enters the critical path for pipes, not for a memory read), so the Cloudtoid
+and pipe ratios above widen on a busy server — when the server is doing real work.
+
+> Reproduce these yourself with the command in [Reproducing](#reproducing). Latency is hardware- and
+> load-sensitive; run it on your own idle box for numbers you can trust, and expect the queue/pipe gaps to grow
+> on a contended one.
 
 ---
 

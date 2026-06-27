@@ -20,7 +20,7 @@ It does two things:
 2. **A multi-way fabric** — broadcast (1→N), a many-to-many bus (N↔N), and an addressed, full-duplex peer
    mesh, all over a Disruptor-style multicast ring with selectable **reliable** or **lossy** delivery.
 
-> Status: working, tested (39 tests green), benchmarked. **Cross-platform — verified on both**: the full suite
+> Status: working, tested (42 tests green), benchmarked. **Cross-platform — verified on both**: the full suite
 > passes on Windows *and* in a .NET 10 Linux container (`/dev/shm` file-backed maps + polling doorbell), and all
 > three libraries build clean for `net8.0` (the ACA LTS runtime) on Linux. On Windows the shared region is a
 > named (page-file-backed) map with a wait-handle doorbell; on Linux it is a `/dev/shm` (tmpfs) file-backed map
@@ -80,116 +80,17 @@ Inside GitHub Actions the built-in `GITHUB_TOKEN` already authorizes the owner's
 
 Every other local-IPC option in .NET **copies and serializes**:
 
-- **gRPC / MagicOnion** — HTTP/2 framing + protobuf/MessagePack encode/decode, even on loopback.
+- **[gRPC](https://grpc.io) / [MagicOnion](https://github.com/Cysharp/MagicOnion)** — HTTP/2 framing +
+  protobuf/MessagePack encode/decode, even on loopback.
 - **Named pipes** — a kernel stream you must frame and serialize over.
-- **Cloudtoid.Interprocess** — a genuine shared-memory queue, but `Dequeue` **copies the message body out**
-  of the ring into a pooled/allocated buffer (it clears the slot and advances the read cursor immediately, so
-  it *cannot* hand back a stable view). You still serialize your object on top.
+- **[Cloudtoid.Interprocess](https://github.com/cloudtoid/interprocess)** — a genuine shared-memory queue, but
+  `Dequeue` **copies the message body out** of the ring into a pooled/allocated buffer (it clears the slot and
+  advances the read cursor immediately, so it *cannot* hand back a stable view). You still serialize your object
+  on top.
 
 Sluice keeps the slot alive until you call `AdvanceRead()`, so the consumer gets a `ReadOnlySpan<byte>`
 pointing **directly into the shared pages**. Combined with blittable message headers read via
 `MemoryMarshal.AsRef`, the read path is a pointer reinterpret — there is nothing to deserialize.
-
----
-
-## Benchmarks
-
-Measured with BenchmarkDotNet v0.14.0 on Windows 11, .NET 10.0.9 (X64 RyuJIT AVX-512), Concurrent Server GC.
-The serialization and multicast tables are the full default job (stable, in-process); allocation figures are
-deterministic everywhere. See [docs/performance.md](docs/performance.md) for the full methodology and the
-load-sensitivity caveat on cross-process latency. Reproduce with `dotnet run -c Release --project
-bench/Sluice.Benchmarks -- --filter '*'`.
-
-### Read in place vs. serialize (the core claim)
-
-This is the cost Sluice's hot path **eliminates** — reading a message is a pointer reinterpret
-(`MemoryMarshal.AsRef`), not a decode. Measured against decoding the same message with the common serializers:
-
-| Reading one message       | Payload | Mean        | Allocated |
-|---------------------------|--------:|------------:|----------:|
-| **Blittable (in place)**  | **64 B** | **6.5 ns** | **0 B**   |
-| MemoryPack deserialize    |    64 B |    107.2 ns |     272 B |
-| MessagePack deserialize   |    64 B |    313.3 ns |     280 B |
-| Json deserialize          |    64 B |    667.1 ns |     336 B |
-| **Blittable (in place)**  | **1024 B** | **15.6 ns** | **0 B** |
-| MemoryPack deserialize    |  1024 B |    392.1 ns |    2192 B |
-| MessagePack deserialize   |  1024 B |    615.3 ns |    2200 B |
-| Json deserialize          |  1024 B |  1,182.9 ns |    2576 B |
-
-Reading a message in place is **~16× faster than MemoryPack**, **~100× faster than JSON**, and allocates
-**nothing** (vs 270 B – 2.5 KB).
-
-### End-to-end request → response (256-byte payload, across frameworks)
-
-A full round trip through real shared memory / pipes (responder on a background thread; the payload still
-crosses the OS boundary). The alternatives must serialize a message to carry the payload — Sluice sends it raw.
-
-**Allocation — exact and load-independent:**
-
-| Transport                       | Allocated | vs Sluice |
-|---------------------------------|----------:|----------:|
-| **Sluice (zero-alloc receive)** | **0 B**   | **0×**    |
-| Sluice (convenience `Send`)     | 280 B     | 1.0×      |
-| Cloudtoid + MemoryPack          | 1475 B    | 5.3×      |
-| Cloudtoid + JSON                | 1772 B    | 6.3×      |
-| Named pipe + MemoryPack         | 2072 B    | 7.4×      |
-| Named pipe + JSON               | 2588 B    | 9.2×      |
-
-**Latency (measured on a contended box — see the caveat below; ratios are a floor):** Sluice ~0.77 µs vs
-Cloudtoid ~34 µs (~45×) vs named pipes ~116 µs (~150×). Sluice's shared-memory path stays sub-microsecond
-under load while the syscall-based transports degrade, so its relative advantage *grows* on a busy machine.
-The everywhere-true claims: **one to two orders of magnitude faster end-to-end**, and **5–9× less garbage — or
-none** on the zero-alloc path.
-
-> The 280 B is the response copied out across the API boundary by the convenience `Send` overload. The
-> span-callback overload `Send<TState>(kind, payload, state, reader)` hands you the response **in place** and
-> allocates **0 B/op** at essentially identical latency — the win is GC-pressure elimination. Use it on hot
-> request paths to remove client-side allocation entirely.
-
-### Multi-way fan-out (per-message cost)
-
-The multicast ring's per-message cost — what sets the throughput ceiling. Read-in-place, zero allocation.
-
-| Operation                          | 32 B     | 256 B    | Allocated |
-|------------------------------------|---------:|---------:|----------:|
-| Publish (fan-out write)            |  8.1 ns  | 13.8 ns  |     0 B   |
-| Publish + consume in place         | 12.6 ns  | 17.9 ns  |     0 B   |
-
-### Aggregate throughput (lossy broadcast, 64-byte messages)
-
-`dotnet run -c Release --project bench/Sluice.Benchmarks -- throughput`
-
-| Producers | Consumers | Messages/sec | GB/sec |
-|----------:|----------:|-------------:|-------:|
-| 1         | 0         |    77.6 M    |  5.9   |
-| 1         | 1         |   135.6 M    | 10.3   |
-| 1         | 4         |   114.3 M    |  8.7   |
-| 2         | 2         |    26.4 M    |  2.0   |
-| 4         | 4         |    16.9 M    |  1.3   |
-| 4         | 1         |    18.1 M    |  1.4   |
-
-Single-producer fan-out runs at **75–135M msgs/sec**; multiple producers contend on the one interlocked claim
-counter (the natural cost of lock-free multi-producer ordering) and still sustain **16–26M msgs/sec aggregate**.
-Unlike the syscall-based transports above, shared-memory throughput holds up under machine load.
-
-### Lifecycle timings (init → bootstrapped → discovered → active → converged)
-
-`dotnet run -c Release --project bench/Sluice.Benchmarks -- lifecycle`
-
-| Subsystem | Stage | Median |
-|-----------|-------|-------:|
-| RPC       | init → bootstrapped (daemon)   | 0.9 ms  |
-| RPC       | bootstrapped → discovered      | 6.6 ms  |
-| RPC       | discovered → active (1st call) | 0.13 ms |
-| Fusion    | host bootstrapped              | 4.0 ms  |
-| Fusion    | mirror attach                  | 0.4 ms  |
-| Fusion    | active (1st fetch)             | 0.1 ms  |
-| Fusion    | invalidation propagation       | 9.5 ms  |
-| Gossip    | init → all discovered (N=3..8) | ~31 ms  |
-| Gossip    | seed → fully converged (N=3..8)| ~15 ms  |
-
-Gossip timings are **flat from N=3 to N=8** — shared-memory multicast reaches every node at once (O(1)),
-not the O(log N) rounds a network gossip protocol needs.
 
 ---
 
@@ -317,6 +218,10 @@ memory. That is the efficiency win the whole library exists for.
   capacity) lets a fresh CLI find the live instance and tell a crash from a running process by staleness.
   Peers announce presence the same way (`ShmPeer.IsPeerAlive`).
 
+The ring protocol is checked with [Microsoft Coyote](https://github.com/microsoft/coyote): its systematic
+scheduler explores the producer/consumer interleavings exhaustively and proves no schedule loses, reorders,
+or tears a message (see [delivery & safety](docs/delivery-and-safety.md#systematic-concurrency-testing)).
+
 ---
 
 ## Documentation
@@ -327,8 +232,10 @@ Deeper guides live in [`docs/`](docs/):
   ring, the OS floor, and the correctness model.
 - **[Choosing a topology](docs/topologies.md)** — a decision table and a copy-paste cookbook for RPC, frame
   channels, topics, peers, gossip, and Fusion.
+- **[The fabric](docs/federation.md)** — the transport-agnostic seam: one channel spanning local shared-memory
+  participants (zero-copy) and remote participants over TCP, indistinguishably.
 - **[Delivery & safety](docs/delivery-and-safety.md)** — reliable vs lossy, torn-read handling, the memory
-  model, and crash robustness, failure mode by failure mode.
+  model, crash robustness, and the systematic concurrency proof, failure mode by failure mode.
 - **[Deployment & cross-platform](docs/deployment.md)** — Windows vs Linux internals, container `/dev/shm`
   sizing, and Azure Container Apps.
 - **[Performance](docs/performance.md)** — the numbers, where they come from, and the knobs that move them.
@@ -355,10 +262,11 @@ history: [CHANGELOG.md](CHANGELOG.md).
   reclaimable.
 - **Response-ring cache** is bounded (FIFO, 256) so a stream of short-lived clients can't leak handles; an
   evicted persistent client just pays one re-open.
-- **Reliable multicast trusts its subscribers.** A registered subscriber that stalls (or crashes without
-  unsubscribing) backpressures every producer on that topic. Use `Reliable` only with cooperative consumers;
-  `Lossy` is crash-robust by design (a dead subscriber is simply lapped). A subscriber lease/timeout to evict
-  the dead automatically is on the roadmap.
+- **Reliable multicast evicts a dead subscriber.** A registered reliable subscriber that stalls would
+  backpressure every producer on the topic — so each subscriber carries a heartbeat lease (`LeaseMs`, default
+  30 s), and a producer reclaims the cell of any subscriber whose lease has lapsed rather than wait on it
+  forever. A subscriber that may pause longer than the lease between reads should call `Heartbeat()`; `Lossy`
+  is crash-robust regardless (a dead subscriber is simply lapped).
 - **Lossy in-place reads can tear** if a producer laps you mid-read; the `TryReadCopy` / `ShmPeer` /
   `ShmTopic` convenience paths re-validate the sequence stamp after copying, so use those for lossy unless you
   validate yourself.
@@ -367,7 +275,8 @@ history: [CHANGELOG.md](CHANGELOG.md).
   raise it — in Azure Container Apps via an `EmptyDir` volume with `storageType: Memory` mounted at `/dev/shm`,
   or in Docker via `--shm-size`. If `/dev/shm` is absent, Sluice falls back to the temp dir (real disk).
 - **Not** a network transport, and **not** a durable queue — it's the fastest path between processes on one
-  box. Pair it with a durable store (FASTER, a log, etc.) if you need persistence.
+  box. Pair it with a durable store ([FASTER](https://github.com/microsoft/FASTER), a log, etc.) if you need
+  persistence.
 
 ## Layout
 
@@ -378,17 +287,126 @@ src/Sluice                 the library
   ShmMap.cs                the one OS split: named map (Windows) vs /dev/shm file map (Linux)
   Rpc/                     SluiceServer, SluiceClient, discovery
   Multiway/                ShmTopic (pub/sub + bus), ShmPeer (addressed full-duplex mesh)
+  Fabric/                  transport-agnostic seam: ITransport / IChannel over local-shm + remote
   IFrameChannel.cs         frame transport seam (drop-in for a duplex Stream, zero-copy on read)
   ShmFrameChannel.cs       bidirectional duplex channel = two rings
   ShmFrameListener.cs      Accept() — multiplex many client connections onto one daemon
 src/Sluice.Gossip          epidemic dissemination (GossipNode: LWW store, rumor + anti-entropy)
 src/Sluice.Fusion          Fusion-style overlay (ModelHost/ModelMirror/MirroredState, lazy invalidation)
-tests/Sluice.Tests         24 xUnit tests (ring, RPC unary/stream/MPSC, multicast MP-claim/lossy/reliable,
-                           broadcast/bus/mesh/duplex, discovery)
+tests/Sluice.Tests         xUnit suite (ring, RPC unary/stream/MPSC, multicast MP-claim/lossy/reliable,
+                           lease eviction, broadcast/bus/mesh/duplex, fabric, discovery)
+tests/Sluice.Concurrency   Microsoft Coyote systematic-concurrency tests for the ring protocol
 bench/Sluice.Benchmarks    BenchmarkDotNet vs Cloudtoid + named pipes, serialization microbench, multicast
                            per-op, and the `throughput` aggregate harness
 samples/Sluice.Demo        the `kvd` daemon + thin-CLI demo
 ```
+
+---
+
+## Benchmarks
+
+Measured with [BenchmarkDotNet](https://benchmarkdotnet.org) v0.14.0 on Windows 11, .NET 10.0.9 (X64 RyuJIT
+AVX-512), Concurrent Server GC. The serialization and multicast tables are the full default job (stable,
+in-process); allocation figures are deterministic everywhere. See [docs/performance.md](docs/performance.md) for
+the full methodology and the load-sensitivity caveat on cross-process latency. Reproduce with `dotnet run -c
+Release --project bench/Sluice.Benchmarks -- --filter '*'`.
+
+### Read in place vs. serialize (the core claim)
+
+This is the cost Sluice's hot path **eliminates** — reading a message is a pointer reinterpret
+(`MemoryMarshal.AsRef`), not a decode. Measured against decoding the same message with
+[MemoryPack](https://github.com/Cysharp/MemoryPack),
+[MessagePack](https://github.com/MessagePack-CSharp/MessagePack-CSharp), and
+[System.Text.Json](https://learn.microsoft.com/dotnet/api/system.text.json):
+
+| Reading one message       | Payload | Mean        | Allocated |
+|---------------------------|--------:|------------:|----------:|
+| **Blittable (in place)**  | **64 B** | **6.5 ns** | **0 B**   |
+| MemoryPack deserialize    |    64 B |    107.2 ns |     272 B |
+| MessagePack deserialize   |    64 B |    313.3 ns |     280 B |
+| Json deserialize          |    64 B |    667.1 ns |     336 B |
+| **Blittable (in place)**  | **1024 B** | **15.6 ns** | **0 B** |
+| MemoryPack deserialize    |  1024 B |    392.1 ns |    2192 B |
+| MessagePack deserialize   |  1024 B |    615.3 ns |    2200 B |
+| Json deserialize          |  1024 B |  1,182.9 ns |    2576 B |
+
+Reading a message in place is **~16× faster than MemoryPack**, **~100× faster than JSON**, and allocates
+**nothing** (vs 270 B – 2.5 KB).
+
+### End-to-end request → response (256-byte payload, across frameworks)
+
+A full round trip through real shared memory / pipes (responder on a background thread; the payload still
+crosses the OS boundary). The alternatives must serialize a message to carry the payload — Sluice sends it raw.
+
+**Allocation — exact and load-independent:**
+
+| Transport                       | Allocated | vs Sluice |
+|---------------------------------|----------:|----------:|
+| **Sluice (zero-alloc receive)** | **0 B**   | **0×**    |
+| Sluice (convenience `Send`)     | 280 B     | 1.0×      |
+| [Cloudtoid](https://github.com/cloudtoid/interprocess) + MemoryPack | 2008 B | 7.2× |
+| Cloudtoid + JSON                | 2520 B    | 9.0×      |
+| Named pipe + MemoryPack         | 2072 B    | 7.4×      |
+| Named pipe + JSON               | 2586 B    | 9.2×      |
+
+**Latency (clean run — two transport classes):** Sluice **471 ns** (zero-alloc **439 ns**) vs Cloudtoid — also
+a shared-memory queue — **1065 ns (~2.3×)** vs named pipes, a syscall transport, **~32 µs (~68×)**. So against a
+serialized shared-memory queue Sluice is ~2–4× faster and 7–9× lighter; against a kernel transport it is ~70×
+faster. Under machine load the syscall gap *widens* (OS scheduling enters the pipe's critical path, not the
+shared-memory read), so the named-pipe ratio grows on a busy server. Latency is hardware-sensitive — see
+[performance.md](docs/performance.md) for the full method and how to reproduce.
+
+> The 280 B is the response copied out across the API boundary by the convenience `Send` overload. The
+> span-callback overload `Send<TState>(kind, payload, state, reader)` hands you the response **in place** and
+> allocates **0 B/op** at near-identical latency — the win is GC-pressure elimination. Use it on hot
+> request paths to remove client-side allocation entirely.
+
+### Multi-way fan-out (per-message cost)
+
+The multicast ring's per-message cost — what sets the throughput ceiling. Read-in-place, zero allocation.
+
+| Operation                          | 32 B     | 256 B    | Allocated |
+|------------------------------------|---------:|---------:|----------:|
+| Publish (fan-out write)            |  8.1 ns  | 13.8 ns  |     0 B   |
+| Publish + consume in place         | 12.6 ns  | 17.9 ns  |     0 B   |
+
+### Aggregate throughput (lossy broadcast, 64-byte messages)
+
+`dotnet run -c Release --project bench/Sluice.Benchmarks -- throughput`
+
+| Producers | Consumers | Messages/sec | GB/sec |
+|----------:|----------:|-------------:|-------:|
+| 1         | 0         |    77.6 M    |  5.9   |
+| 1         | 1         |   135.6 M    | 10.3   |
+| 1         | 4         |   114.3 M    |  8.7   |
+| 2         | 2         |    26.4 M    |  2.0   |
+| 4         | 4         |    16.9 M    |  1.3   |
+| 4         | 1         |    18.1 M    |  1.4   |
+
+Single-producer fan-out runs at **75–135M msgs/sec**; multiple producers contend on the one interlocked claim
+counter (the natural cost of lock-free multi-producer ordering) and still sustain **16–26M msgs/sec aggregate**.
+Unlike the syscall-based transports above, shared-memory throughput holds up under machine load.
+
+### Lifecycle timings (init → bootstrapped → discovered → active → converged)
+
+`dotnet run -c Release --project bench/Sluice.Benchmarks -- lifecycle`
+
+| Subsystem | Stage | Median |
+|-----------|-------|-------:|
+| RPC       | init → bootstrapped (daemon)   | 0.9 ms  |
+| RPC       | bootstrapped → discovered      | 6.6 ms  |
+| RPC       | discovered → active (1st call) | 0.13 ms |
+| Fusion    | host bootstrapped              | 4.0 ms  |
+| Fusion    | mirror attach                  | 0.4 ms  |
+| Fusion    | active (1st fetch)             | 0.1 ms  |
+| Fusion    | invalidation propagation       | 9.5 ms  |
+| Gossip    | init → all discovered (N=3..8) | ~31 ms  |
+| Gossip    | seed → fully converged (N=3..8)| ~15 ms  |
+
+Gossip timings are **flat from N=3 to N=8** — shared-memory multicast reaches every node at once (O(1)),
+not the O(log N) rounds a network gossip protocol needs.
+
+---
 
 ## License
 

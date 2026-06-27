@@ -1,8 +1,6 @@
 # Delivery semantics & safety
 
-This document is the failure-mode-by-failure-mode treatment: what each delivery mode guarantees, how torn reads
-are handled, and what happens when a participant crashes. It's the document to read before you trust Sluice with
-something that matters.
+What each delivery mode guarantees, how torn reads are handled, and what happens when a participant crashes.
 
 ## Reliable vs lossy
 
@@ -19,7 +17,7 @@ the ring. Point-to-point RPC and frame channels are always reliable.
   as its slowest reader. A subscriber that registers and then stops reading (without disposing) will eventually
   freeze all publishers.
 - **Use when**: consumers are cooperative and in-process-family (you control them), and completeness matters more
-  than isolation — commands, events you must not lose, the Fusion invalidation channel.
+  than isolation — commands, events you must not lose, the [Fusion](https://github.com/ActualLab/Fusion) invalidation channel.
 
 ### Lossy
 
@@ -116,3 +114,27 @@ observed even if a signal is missed:
   [architecture](architecture.md#layer-1b--shmmulticast-the-sequenced-mpmc-ring).)
 
 This means a missed wakeup degrades to a slightly later wakeup, never a hang.
+
+## Systematic concurrency testing
+
+The ring's correctness rests on one release/acquire pairing: the producer writes the payload bytes and *then*
+releases the write cursor; the consumer acquires the write cursor and *then* reads the bytes. A unit test runs
+that protocol once, on whatever interleaving the OS happened to pick — it can't tell you the protocol is right,
+only that it didn't break *this time*.
+
+[Microsoft Coyote](https://github.com/microsoft/coyote) closes that gap. It rewrites the assemblies, takes
+control of the scheduler, and explores the producer/consumer interleavings *exhaustively* within a step bound —
+thousands of distinct schedules, each making thousands of scheduling decisions at every cursor read, spin, and
+task yield. The tests in `tests/Sluice.Concurrency` assert the ring's safety property across all of them:
+
+- **`Spsc_ring_never_loses_reorders_or_tears_a_message`** — a stream far larger than a deliberately tiny ring
+  (forcing repeated wraps and skip-marker fillers); the consumer must observe exactly `0..N-1`, in order, with
+  no loss, duplication, or torn read, under every schedule.
+- **`Read_in_place_slot_is_not_reclaimed_before_AdvanceRead`** — the zero-copy guarantee: a slot a consumer is
+  reading in place is never overwritten by the producer before `AdvanceRead`, even with the producer poised to
+  reclaim it at every scheduling point.
+
+Both explore cleanly with **0 bugs**. Run them with [`scripts/run-coyote.ps1`](../scripts/run-coyote.ps1) (or
+`.sh`); CI runs them on every push as the `concurrency-check` job. The harness is verified to *find* bugs — an
+injected lost-update race is caught in 100% of schedules — so a green run is a real proof of safety, not a test
+that merely can't fail.

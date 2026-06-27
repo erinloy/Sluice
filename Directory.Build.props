@@ -20,7 +20,18 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <IncludeSymbols>true</IncludeSymbols>
     <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+
+    <!-- Reproducible builds: SourceLink steps debuggers straight to the exact source on GitHub. -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <Deterministic>true</Deterministic>
+    <!-- CI sets ContinuousIntegrationBuild=true to normalize embedded paths for a byte-reproducible package. -->
   </PropertyGroup>
+
+  <!-- SourceLink for GitHub — only on the packable libraries (skip tests/bench/samples). -->
+  <ItemGroup Condition="'$(IsPackable)' != 'false'">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
 
   <!-- Embed the one Sluice README in every package (it lives next to this props file). -->
   <ItemGroup>

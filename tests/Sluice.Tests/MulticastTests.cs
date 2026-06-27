@@ -77,7 +77,7 @@ public class MulticastTests
     }
 
     [Fact]
-    public void Reliable_backpressures_so_a_wrapping_stream_loses_nothing()
+    public async Task Reliable_backpressures_so_a_wrapping_stream_loses_nothing()
     {
         using var ring = ShmMulticast.Create(N(), maxPayload: 64, slotCount: 8, mode: DeliveryMode.Reliable);
         var sub = ring.Subscribe();
@@ -95,11 +95,42 @@ public class MulticastTests
         for (long i = 0; i < n; i++)
             ring.Publish(BitConverter.GetBytes(i), cts.Token);
 
-        var got = consumer.GetAwaiter().GetResult();
+        var got = await consumer;
         Assert.Equal(n, got.Count);
         for (int i = 0; i < n; i++) Assert.Equal(i, got[i]);
         Assert.Equal(0, sub.Dropped);
         sub.Dispose();
+    }
+
+    [Fact]
+    public async Task Reliable_producer_evicts_a_crashed_subscriber_after_its_lease()
+    {
+        // A reliable producer gates on the slowest subscriber. A crashed subscriber that stops reading would
+        // wedge the producer forever — unless its lease lapses and the producer reclaims its cell.
+        using var ring = ShmMulticast.Create(N(), maxPayload: 64, slotCount: 8,
+            mode: DeliveryMode.Reliable, leaseMs: 200);
+        var alive = ring.Subscribe();   // keeps draining
+        var dead = ring.Subscribe();    // registered, then never reads again (simulating a crash)
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+
+        const int n = 200; // ≫ slotCount(8): without eviction the producer blocks on `dead` after one lap
+        var consumer = Task.Run(() =>
+        {
+            int got = 0;
+            while (got < n && alive.Wait(cts.Token))
+                if (alive.TryRead(out _)) { alive.Advance(); got++; }
+            return got;
+        });
+
+        var producer = Task.Run(() =>
+        {
+            for (long i = 0; i < n; i++) ring.Publish(BitConverter.GetBytes(i), cts.Token);
+        });
+
+        await producer;                 // returns only if `dead` was evicted; otherwise it cancels at 15s and throws
+        Assert.Equal(n, await consumer);
+        dead.Dispose();
+        alive.Dispose();
     }
 
     [Fact]
