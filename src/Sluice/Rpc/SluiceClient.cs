@@ -176,7 +176,15 @@ public sealed class SluiceClient : IDisposable
             return;
         }
 
-        _reqMutex.WaitOne();
+        // AbandonedMutexException MEANS WE OWN IT, AND CATCHING IT OUTSIDE THE try WAS A PERMANENT WEDGE.
+        // A client process killed while holding this mutex (a harness hook timeout, a Ctrl-C, a crash) leaves it
+        // abandoned. .NET then hands ownership to the next waiter and reports that by THROWING — so the old code,
+        // which called WaitOne before entering the try, propagated out with the mutex HELD and never released. One
+        // killed client took the endpoint down for every process on the machine, permanently, with no diagnostic.
+        // The prior holder died mid-write, so the ring may carry a torn frame; that is the ring's own framing problem
+        // and it self-corrects on the next read, whereas a lost mutex does not self-correct at all.
+        try { _reqMutex.WaitOne(); }
+        catch (AbandonedMutexException) { /* the prior holder died — ownership is OURS; fall through and release below */ }
         try
         {
             _requests.SyncProducerCursor();

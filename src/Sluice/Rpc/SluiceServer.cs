@@ -69,7 +69,20 @@ public sealed class SluiceServer : IDisposable
     }
 
     // Publish a reply frame ([RpcHeader][payload]) into the given client's response ring.
+    //
+    // LOCKED, because a reply may now arrive from a thread that is not the dispatch loop (see RpcContext.Defer). This
+    // method mutates three pieces of shared state — the clientId→ring cache, its FIFO eviction queue, and the rented
+    // scratch buffer — and a torn write here would corrupt an unrelated client's response frame, which is the worst
+    // possible failure mode: not a lost reply, a WRONG one. Uncontended in the classic single-loop case, so the
+    // zero-copy hot path pays only an uncontended lock.
+    private readonly object _publishLock = new();
+
     internal void Publish(long clientId, Guid corr, RpcFlags flags, ReadOnlySpan<byte> payload)
+    {
+        lock (_publishLock) { PublishLocked(clientId, corr, flags, payload); }
+    }
+
+    private void PublishLocked(long clientId, Guid corr, RpcFlags flags, ReadOnlySpan<byte> payload)
     {
         if (!_responses.TryGetValue(clientId, out var ring))
         {
@@ -138,6 +151,20 @@ public readonly ref struct RpcContext
     public void Reply(ReadOnlySpan<byte> payload, bool ok = true)
         => _server.Publish(ClientId, CorrelationId, RpcFlags.Response | (ok ? RpcFlags.Ok : RpcFlags.None), payload);
 
+    /// <summary>
+    /// Detach the right to answer this request, so the reply can be sent LATER, from ANOTHER thread.
+    ///
+    /// <para>The dispatch loop calls the handler SYNCHRONOUSLY, so a handler that does seconds of work stops the owner
+    /// reading the request ring at all — every other client's every call, however cheap, waits behind it. That is
+    /// head-of-line blocking at the transport, and no amount of concurrency further in can be reached through it.</para>
+    ///
+    /// <para>A handler that wants to offload must copy what it needs out of <see cref="Request"/> first — the span is a
+    /// view over shared memory that is only valid for the callback — then take a <see cref="DeferredReply"/> and return.
+    /// The loop moves on immediately; the reply lands whenever the work finishes. Exactly one of <see cref="Reply"/> or
+    /// the deferred reply must be sent: the caller blocks until a correlated frame arrives.</para>
+    /// </summary>
+    public DeferredReply Defer() => new(_server, ClientId, CorrelationId);
+
     /// <summary>Send one element of a streamed response. Finish with <see cref="Complete"/>.</summary>
     public void StreamItem(ReadOnlySpan<byte> payload)
         => _server.Publish(ClientId, CorrelationId, RpcFlags.Response | RpcFlags.Ok | RpcFlags.StreamItem, payload);
@@ -145,4 +172,22 @@ public readonly ref struct RpcContext
     /// <summary>Terminate a streamed response.</summary>
     public void Complete()
         => _server.Publish(ClientId, CorrelationId, RpcFlags.Response | RpcFlags.Ok | RpcFlags.StreamEnd, ReadOnlySpan<byte>.Empty);
+}
+
+/// <summary>The right to answer one request after the dispatch loop has moved on. Obtained from
+/// <see cref="RpcContext.Defer"/>; safe to carry across threads and awaits, unlike the <c>ref struct</c> context.</summary>
+public readonly struct DeferredReply
+{
+    private readonly SluiceServer _server;
+    private readonly long _clientId;
+    private readonly Guid _corr;
+
+    internal DeferredReply(SluiceServer server, long clientId, Guid corr)
+        => (_server, _clientId, _corr) = (server, clientId, corr);
+
+    /// <summary>Send the unary response. The caller may already have abandoned its wait (a client-side timeout), in
+    /// which case its response ring can be gone — that throws, and it is the CALLER of this method that must decide a
+    /// vanished client is not an error worth taking the daemon down for.</summary>
+    public void Reply(ReadOnlySpan<byte> payload, bool ok = true)
+        => _server.Publish(_clientId, _corr, RpcFlags.Response | (ok ? RpcFlags.Ok : RpcFlags.None), payload);
 }
