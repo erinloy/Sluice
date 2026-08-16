@@ -1,3 +1,5 @@
+NOTICE: AI GENERATED SLOP. KNOWN TO WORK, BUT BARELY REVIEWED. TAKE APPROPRIATE PERCAUTIONS IN YOUR DOWNSTREAM AI GENERATED SLOP.
+
 # Sluice
 
 [![CI](https://github.com/erinloy/Sluice/actions/workflows/ci.yml/badge.svg)](https://github.com/erinloy/Sluice/actions/workflows/ci.yml)
