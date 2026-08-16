@@ -15,6 +15,7 @@ public sealed class SluiceClient : IDisposable
     private readonly ShmRing _responses;   // this client is the single consumer (and creator)
     private readonly ShmRing _requests;    // opened as a producer; shared with other clients + owner
     private readonly Mutex? _reqMutex;     // serialises the many-producer request ring (null = exclusive)
+    private readonly string _endpointName;   // diagnostics only — a timeout must name WHICH endpoint stalled
     private byte[] _scratch = ArrayPool<byte>.Shared.Rent(64 * 1024);
 
     public long ClientId => _clientId;
@@ -29,6 +30,7 @@ public sealed class SluiceClient : IDisposable
     /// <param name="responseCapacity">Size of this client's private response ring.</param>
     public SluiceClient(string endpoint, bool exclusiveProducer = false, long responseCapacity = 1 << 20)
     {
+        _endpointName = endpoint;
         _clientId = NewClientId();
         _responses = ShmRing.Create(RingNames.Response(endpoint, _clientId), responseCapacity);
         _requests = ShmRing.Open(RingNames.Request(endpoint));
@@ -183,15 +185,63 @@ public sealed class SluiceClient : IDisposable
         // killed client took the endpoint down for every process on the machine, permanently, with no diagnostic.
         // The prior holder died mid-write, so the ring may carry a torn frame; that is the ring's own framing problem
         // and it self-corrects on the next read, whereas a lost mutex does not self-correct at all.
-        try { _reqMutex.WaitOne(); }
-        catch (AbandonedMutexException) { /* the prior holder died — ownership is OURS; fall through and release below */ }
-        try
+        //
+        // 🛑 THE MUTEX IS NEVER HELD ACROSS A WAIT. THIS IS THE FIX FOR A FLEET-WIDE HANG, NOT A TIDY-UP.
+        //
+        // This used to be `WaitOne()` (unbounded) around `_requests.Write(...)` — and `ShmRing.Write` SPINS until the
+        // ring has space, with a `ct` the call site never passed, i.e. forever. So a FULL request ring meant one writer
+        // spinning inside the cross-process mutex while EVERY other process on the machine blocked on WaitOne with no
+        // timeout. A lock held across an unbounded wait converts one slow reader into a machine-wide outage.
+        //
+        // 🩸 MEASURED, and the operator's workaround is the proof: hook 1 in a process took 2,395,182 ms (one observed
+        // at 49 MINUTES) while hooks 2 and 3 in that SAME process took 185 ms and 126 ms — first-call-blocks,
+        // everything-after-fast, which is the shape of contending for a held mutex exactly once per process. Erin:
+        // "I am killing agentparticipant periodically to allow you to work." Killing the holder is what released it —
+        // .NET hands ownership to the next waiter via AbandonedMutexException, so a kill genuinely cures it. That is a
+        // held-lock signature, not a slow-service one.
+        //
+        // ⚖️ WHY NOT JUST BOUND THE WaitOne: that caps how long each victim waits and leaves the CAUSE — a writer
+        // parked in a spin loop holding the lock — running. The lock now covers only a NON-BLOCKING TryWrite; if the
+        // ring is full we RELEASE FIRST and back off outside the critical section, so a full ring can never block
+        // anybody else. Both the acquire and the overall write are additionally bounded so a pathological peer
+        // produces a fast, loud failure instead of a silent multi-minute stall.
+        var deadline = Environment.TickCount64 + WriteTimeoutMs;
+        var spin = new SpinWait();
+        while (true)
         {
-            _requests.SyncProducerCursor();
-            _requests.Write(_scratch.AsSpan(0, frameLen));
+            bool owned;
+            try { owned = _reqMutex.WaitOne(MutexAcquireMs); }
+            catch (AbandonedMutexException) { owned = true; /* prior holder died — ownership is OURS */ }
+
+            if (owned)
+            {
+                try
+                {
+                    _requests.SyncProducerCursor();
+                    if (_requests.TryWrite(_scratch.AsSpan(0, frameLen)))
+                        return;
+                }
+                finally { _reqMutex.ReleaseMutex(); }   // released BEFORE any wait, always
+            }
+
+            // Here we hold NOTHING: either the acquire timed out, or the ring was full and we let go.
+            if (Environment.TickCount64 >= deadline)
+                throw new TimeoutException(
+                    $"Sluice request ring '{_endpointName}' did not accept a frame within {WriteTimeoutMs} ms. " +
+                    "The ring is full (its reader is not draining) or the producer mutex is contended. This is a " +
+                    "BOUNDED failure by design: the alternative — spinning inside the cross-process mutex — stalls " +
+                    "every other process on this machine until someone kills the holder.");
+            spin.SpinOnce();
         }
-        finally { _reqMutex.ReleaseMutex(); }
     }
+
+    /// <summary>Cap on ONE attempt to take the producer mutex. Short: a long hold means the holder is in trouble, and
+    /// re-trying the whole acquire is cheaper than queueing behind it.</summary>
+    private const int MutexAcquireMs = 250;
+
+    /// <summary>Cap on the WHOLE write, across retries. Generous enough that ordinary contention is invisible, finite
+    /// so a wedged reader surfaces as a timeout rather than an indefinite hang.</summary>
+    private const int WriteTimeoutMs = 5_000;
 
     public void Dispose()
     {
