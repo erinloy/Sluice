@@ -121,7 +121,7 @@ TryWrite(payload):                       TryRead(out span):
 
 The contract is `if (TryRead(out span)) { /* use span */ AdvanceRead(); }`. The slot stays alive — the
 producer cannot reuse it — **until** `AdvanceRead()`. That single decision is the whole difference from
-`Cloudtoid.Interprocess`, whose `Dequeue` clears the slot and advances the read cursor immediately, so it
+[`Cloudtoid.Interprocess`](https://github.com/cloudtoid/interprocess), whose `Dequeue` clears the slot and advances the read cursor immediately, so it
 *must* copy the body out before returning. Sluice defers the advance to the caller, so it can hand back a
 stable view.
 
@@ -148,7 +148,7 @@ they are independent, and the exclusive path drops only the mutex, never the syn
 ## Layer 1b — `ShmMulticast`: the sequenced MPMC ring
 
 Broadcast and bus need a different shape: many producers, and many *independent* readers that each see **every**
-message. This is a Disruptor-style sequenced ring.
+message. This is a [Disruptor](https://lmax-exchange.github.io/disruptor/)-style sequenced ring.
 
 ```
  header: [claim cursor][mode][slotCount][slotSize][maxConsumers][magic][consumer cells…]

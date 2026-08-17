@@ -16,6 +16,7 @@ public sealed class ShmPeer : IDisposable
     private readonly ShmMulticast _inbox;
     private readonly ShmMulticast.Subscriber _self;
     private readonly Dictionary<string, ShmMulticast> _outboxes = new(StringComparer.Ordinal);
+    private readonly object _outboxGate = new();   // Send may be called concurrently from many threads
 
     public string Name { get; }
 
@@ -43,10 +44,18 @@ public sealed class ShmPeer : IDisposable
     /// </summary>
     public void Send(string toPeer, ReadOnlySpan<byte> payload, CancellationToken ct = default)
     {
-        if (!_outboxes.TryGetValue(toPeer, out var ring))
+        // Resolve (or attach) the outbox under a lock — the cache is a plain Dictionary and Send is hot from
+        // multiple threads (e.g. a fabric channel's pump replying while a worker thread sends a request). The
+        // ring's own Publish is lock-free, so it stays outside the lock; the lock only guards the cache lookup,
+        // which is uncontended once the peer is warm.
+        ShmMulticast ring;
+        lock (_outboxGate)
         {
-            ring = ShmMulticast.CreateOrAttach(InboxName(toPeer), _maxPayload, _slotCount, _mode);
-            _outboxes[toPeer] = ring;
+            if (!_outboxes.TryGetValue(toPeer, out ring!))
+            {
+                ring = ShmMulticast.CreateOrAttach(InboxName(toPeer), _maxPayload, _slotCount, _mode);
+                _outboxes[toPeer] = ring;
+            }
         }
         ring.Publish(payload, ct);
     }
@@ -69,6 +78,7 @@ public sealed class ShmPeer : IDisposable
     {
         _self.Dispose();
         _inbox.Dispose();
-        foreach (var r in _outboxes.Values) r.Dispose();
+        lock (_outboxGate)
+            foreach (var r in _outboxes.Values) r.Dispose();
     }
 }

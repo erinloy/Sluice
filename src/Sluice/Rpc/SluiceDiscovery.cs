@@ -6,8 +6,8 @@ namespace Sluice.Rpc;
 /// <summary>
 /// Zero-config discovery for the daemon+thin-CLI pattern: a single owner is elected via a system-global named
 /// mutex, and publishes a small lease file (pid + heartbeat + capacity) so a freshly-launched CLI process can
-/// find the live instance — and tell a crashed one from a running one by heartbeat staleness. Mirrors the
-/// named-mutex + lease-file approach proven in the Bitter control plane.
+/// find the live instance — and tell a crashed one from a running one by heartbeat staleness. It is the
+/// named-mutex + lease-file pattern common to daemon/control-plane discovery.
 /// </summary>
 public static class SluiceDiscovery
 {

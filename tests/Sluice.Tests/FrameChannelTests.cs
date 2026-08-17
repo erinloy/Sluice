@@ -31,7 +31,7 @@ public class FrameChannelTests
     }
 
     [Fact]
-    public void Listener_multiplexes_many_clients_each_on_its_own_duplex_channel()
+    public async Task Listener_multiplexes_many_clients_each_on_its_own_duplex_channel()
     {
         var endpoint = "lsn-" + Guid.NewGuid().ToString("N");
         using var listener = new ShmFrameListener(endpoint);
@@ -77,11 +77,11 @@ public class FrameChannelTests
             ch.WriteFrame(Encoding.UTF8.GetBytes("STOP"));
         });
 
-        serverTask.Wait(TimeSpan.FromSeconds(15));
+        await serverTask.WaitAsync(TimeSpan.FromSeconds(15));
     }
 
     [Fact]
-    public void Frames_preserve_order_and_boundaries_under_load()
+    public async Task Frames_preserve_order_and_boundaries_under_load()
     {
         var name = N();
         using var server = ShmFrameChannel.CreateServerSide(name);
@@ -105,6 +105,6 @@ public class FrameChannelTests
         for (int i = 0; i < n; i++)
             client.WriteFrame(Encoding.UTF8.GetBytes($"msg-{i}"), cts.Token);
 
-        Assert.Equal(n, reader.GetAwaiter().GetResult());
+        Assert.Equal(n, await reader);
     }
 }

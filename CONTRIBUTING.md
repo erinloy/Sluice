@@ -28,16 +28,28 @@ dotnet run -c Release --project bench/Sluice.Benchmarks -- throughput
 dotnet run -c Release --project bench/Sluice.Benchmarks -- lifecycle
 ```
 
+Systematic concurrency tests (Coyote) — required if you touch the ring/cursor protocol under `src/Sluice`:
+
+```bash
+dotnet tool install --global Microsoft.Coyote.CLI --version 1.7.11   # one-time
+./scripts/run-coyote.sh        # build → rewrite → explore; pwsh: ./scripts/run-coyote.ps1
+```
+
+This is a separate project (`tests/Sluice.Concurrency`, net8.0 — the Coyote CLI host) and is **not** in
+`Sluice.slnx`, so the normal build/test never touches it. CI runs it as the `concurrency-check` job. See
+[docs/delivery-and-safety.md](docs/delivery-and-safety.md#systematic-concurrency-testing) for what it proves.
+
 ## Project layout
 
 ```
-src/Sluice          core: ShmRing, ShmMulticast, ShmMap, RPC, Multiway, frame channel
-src/Sluice.Gossip   epidemic LWW store
-src/Sluice.Fusion   attach/mirror/cache overlay (+ typed generics)
-tests/Sluice.Tests  xUnit suite
-bench/…             BenchmarkDotNet comparisons + lifecycle/throughput harnesses
-samples/Sluice.Demo the kvd daemon+CLI demo
-docs/               the deep-dive guides
+src/Sluice              core: ShmRing, ShmMulticast, ShmMap, RPC, Multiway, frame channel
+src/Sluice.Gossip       epidemic LWW store
+src/Sluice.Fusion       attach/mirror/cache overlay (+ typed generics)
+tests/Sluice.Tests      xUnit suite
+tests/Sluice.Concurrency  Coyote systematic-concurrency tests (run via scripts/run-coyote.*)
+bench/…                 BenchmarkDotNet comparisons + lifecycle/throughput harnesses
+samples/Sluice.Demo     the kvd daemon+CLI demo
+docs/                   the deep-dive guides
 ```
 
 Read [docs/architecture.md](docs/architecture.md) before changing anything under `src/Sluice` — the layering

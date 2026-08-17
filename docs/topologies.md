@@ -204,7 +204,7 @@ Because the fan-out is shared-memory multicast, convergence latency is flat as t
 
 ---
 
-## Fusion — mirror & cache a data model
+## [Fusion](https://github.com/ActualLab/Fusion) — mirror & cache a data model
 
 A process publishes a model; others mirror keys lazily and stay fresh via invalidations. The origin sends
 *staleness*, never values — readers fetch on demand.

@@ -4,10 +4,12 @@
   </Folder>
   <Folder Name="/samples/">
     <Project Path="samples/Sluice.Demo/Sluice.Demo.csproj" />
+    <Project Path="samples/Sluice.SupergraphDemo/Sluice.SupergraphDemo.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Sluice.Fusion/Sluice.Fusion.csproj" />
     <Project Path="src/Sluice.Gossip/Sluice.Gossip.csproj" />
+    <Project Path="src/Sluice.Supergraph/Sluice.Supergraph.csproj" />
     <Project Path="src/Sluice/Sluice.csproj" />
   </Folder>
   <Folder Name="/tests/">
