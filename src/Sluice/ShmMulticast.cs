@@ -293,7 +293,65 @@ public sealed unsafe class ShmMulticast : IDisposable
                 return new Subscriber(this, i, head + 1);
             }
         }
-        throw new InvalidOperationException($"multicast ring is full ({_maxConsumers} subscribers).");
+        // 🔴 CLAIM-PATH RECLAIM. A full ring is where a LEAKED slot finally costs something, and until now it was
+        // also the one place that could not do anything about it.
+        //
+        // Lease eviction lives in MinConsumerCursor(), which is called ONLY from the publish gate under
+        // `Mode == DeliveryMode.Reliable`. So on a LOSSY ring nothing ever reclaims: a crashed or leaked subscriber
+        // holds its cell until the shared memory itself is destroyed. Measured 2026-08-21 (@ziltch2): the fleet's
+        // machine-global qsub topic — Lossy — wedged at 64/64 and stayed wedged. Every cell-hosting test process
+        // attaches one subscriber four registration layers below its composition root, so the slots were consumed
+        // faster than any per-caller discipline could return them, and no producer on that ring was reliable enough
+        // to run the scan.
+        //
+        // ⚖️ HERE, NOT ON EVERY SUBSCRIBE, and that is the whole cost argument: the scan is O(maxConsumers) with a
+        // CAS per lapsed cell, and it runs only when we are otherwise about to THROW. A healthy ring never reaches
+        // this line, so the common path is unchanged; a wedged one gets exactly one chance to heal itself.
+        //
+        // 🔑 IT HEALS WITHOUT AN OUTAGE, which is the property that matters: the alternative cure for a full ring is
+        // stopping every process attached to it. Reclaiming a lapsed cell here lets a live process attach to a ring
+        // that dead processes had permanently reserved, with no restart anywhere.
+        //
+        // ⚠️ A cell is reclaimed ONLY when its heartbeat has genuinely lapsed past the lease (and never when the
+        // lease is disabled), so this cannot steal a slot from a subscriber that is merely idle-but-alive — the same
+        // rule the reliable path already applies, on the same evidence.
+        if (_leaseMs > 0 && ReclaimLapsedCells() > 0)
+        {
+            head = Volatile.Read(ref Ref<long>(CursorPos));
+            for (int i = 0; i < _maxConsumers; i++)
+            {
+                if (Interlocked.CompareExchange(ref ConsumerCell(i), head, FreeCell) == FreeCell)
+                {
+                    Heartbeat(i);
+                    return new Subscriber(this, i, head + 1);
+                }
+            }
+        }
+
+        throw new InvalidOperationException(
+            $"multicast ring is full ({_maxConsumers} subscribers) and no cell's lease had lapsed. "
+            + "Every slot is held by a subscriber that has heartbeat within the lease window, so these are LIVE "
+            + "readers, not leaked ones — raise maxConsumers or attach fewer subscribers.");
+    }
+
+    /// <summary>Free every consumer cell whose heartbeat has lapsed past the lease; returns how many were reclaimed.
+    ///
+    /// <para>The same evidence and the same CAS the reliable publish gate uses — factored out so the CLAIM path can
+    /// reclaim too. A cell that has never stamped a heartbeat (<c>beat == 0</c>) is left alone: it is a subscriber
+    /// that registered and has not yet run, not a corpse.</para></summary>
+    private int ReclaimLapsedCells()
+    {
+        int freed = 0;
+        long now = Environment.TickCount64;
+        for (int i = 0; i < _maxConsumers; i++)
+        {
+            long v = Volatile.Read(ref ConsumerCell(i));
+            if (v == FreeCell) continue;
+            long beat = Volatile.Read(ref ConsumerTick(i));
+            if (beat == 0 || now - beat <= _leaseMs) continue;
+            if (Interlocked.CompareExchange(ref ConsumerCell(i), FreeCell, v) == v) freed++;
+        }
+        return freed;
     }
 
     internal void Unsubscribe(int cell) => Volatile.Write(ref ConsumerCell(cell), FreeCell);

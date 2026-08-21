@@ -149,4 +149,46 @@ public class MulticastTests
         Assert.Equal(19, seen[^1]);
         late.Dispose();
     }
+
+    /// <summary>A FULL ring reclaims cells whose lease has lapsed, so a live process can attach where dead ones
+    /// left slots reserved.
+    ///
+    /// <para>🔴 WHY THIS EXISTS: lease eviction ran ONLY from the publish gate, under
+    /// <c>Mode == DeliveryMode.Reliable</c>. On a LOSSY ring nothing ever reclaimed, so a crashed or leaked
+    /// subscriber held its cell until the shared memory was destroyed. Measured on the live fleet 2026-08-21: the
+    /// machine-global qsub topic — Lossy — wedged at 64/64 and stayed wedged, and the only other cure was stopping
+    /// every process attached to it.</para></summary>
+    [Fact]
+    public void A_full_ring_reclaims_a_LAPSED_cell_on_the_claim_path()
+    {
+        using var ring = ShmMulticast.Create(N(), maxPayload: 64, slotCount: 16,
+                                             mode: DeliveryMode.Lossy, maxConsumers: 2, leaseMs: 40);
+        var a = ring.Subscribe();
+        var b = ring.Subscribe();
+        Assert.Throws<InvalidOperationException>(() => ring.Subscribe());   // genuinely full, leases still fresh
+
+        Thread.Sleep(160);   // both leases lapse; neither subscriber touches the ring
+
+        // The claim path now runs the same eviction the reliable publish gate does, so this SUCCEEDS where it threw.
+        var c = ring.Subscribe();
+        Assert.NotNull(c);
+        GC.KeepAlive(a); GC.KeepAlive(b);
+    }
+
+    /// <summary>...and it must NOT steal a slot from a subscriber that is merely idle-but-ALIVE. Without this arm the
+    /// reclaim above would be indistinguishable from "a full ring always yields", which would hand one live reader's
+    /// cell to another and drop its messages silently.</summary>
+    [Fact]
+    public void A_full_ring_refuses_when_every_cell_is_still_HEARTBEATING()
+    {
+        using var ring = ShmMulticast.Create(N(), maxPayload: 64, slotCount: 16,
+                                             mode: DeliveryMode.Lossy, maxConsumers: 2, leaseMs: 40);
+        var a = ring.Subscribe();
+        var b = ring.Subscribe();
+
+        for (int i = 0; i < 8; i++) { Thread.Sleep(20); a.Heartbeat(); b.Heartbeat(); }   // alive, past one lease
+
+        var ex = Assert.Throws<InvalidOperationException>(() => ring.Subscribe());
+        Assert.Contains("no cell's lease had lapsed", ex.Message);
+    }
 }
