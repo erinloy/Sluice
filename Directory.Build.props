@@ -30,7 +30,7 @@
 
   <!-- SourceLink for GitHub — only on the packable libraries (skip tests/bench/samples). -->
   <ItemGroup Condition="'$(IsPackable)' != 'false'">
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.401" PrivateAssets="All" />
   </ItemGroup>
 
   <!-- Embed the one Sluice README in every package (it lives next to this props file). -->
